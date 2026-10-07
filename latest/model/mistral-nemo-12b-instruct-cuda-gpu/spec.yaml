@@ -1,16 +1,17 @@
 $schema: https://azuremlschemas.azureedge.net/latest/model.schema.json
 name: mistral-nemo-12b-instruct-cuda-gpu
 path: ./
-isArchived: true
 tags:
   capabilities: tool-calling
   supportsReasoning: ''
   contextLength: 131072
 system_metadata:
+  previewType: hideUI
   alias: mistral-nemo-12b-instruct
   publisher: Microsoft
   directoryPath: v1
   foundryLocal: ''
+  deploymentOptions: ['Foundry Local on Devices']
   inputModalities:
   - text
   license: apache-2.0

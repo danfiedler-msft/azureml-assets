@@ -6,7 +6,7 @@ import math
 import os
 import logging
 import re
-from typing import Dict, List, Union
+from typing import Dict, List, Tuple, Union
 
 from typing_extensions import overload, override
 
@@ -27,7 +27,6 @@ from azure.ai.evaluation._constants import EVALUATION_PASS_FAIL_MAPPING
 from azure.ai.evaluation._common.constants import PROMPT_BASED_REASON_EVALUATORS
 from azure.ai.evaluation._common.utils import (
     parse_quality_evaluator_reason_score,
-    reformat_agent_response,
 )
 from azure.ai.evaluation._evaluators._common._validators import (
     ValidatorInterface,
@@ -35,12 +34,30 @@ from azure.ai.evaluation._evaluators._common._validators import (
 )
 
 try:  # azure-ai-evaluation >= 1.18.1
-    from azure.ai.evaluation._common.utils import _is_intermediate_response, _preprocess_messages
+    from azure.ai.evaluation._common.utils import (
+        _is_intermediate_response,
+        _preprocess_messages,
+        _split_messages_at_latest_user,
+    )
 except ImportError:  # azure-ai-evaluation 1.17.x (backward compat; remove when 1.17.x is dropped)  # pragma: no cover
     from azure.ai.evaluation._evaluators._common._base_prompty_eval import (
         _is_intermediate_response,
         _preprocess_messages,
     )
+
+    def _split_messages_at_latest_user(messages: List[dict]) -> Tuple[List[dict], List[dict]]:
+        latest_user_index = max(
+            (index for index, message in enumerate(messages) if message.get("role") == "user"),
+            default=-1,
+        )
+        if latest_user_index == -1:
+            raise EvaluationException(
+                message="messages must contain at least one message with role 'user'.",
+                blame=ErrorBlame.USER_ERROR,
+                category=ErrorCategory.INVALID_VALUE,
+                target=ErrorTarget.FLUENCY_EVALUATOR,
+            )
+        return messages[: latest_user_index + 1], messages[latest_user_index + 1:]
 
 # Re-exported so the module keeps exposing the message-preprocessing helpers used
 # by the test suite; they are invoked indirectly through _preprocess_messages.
@@ -56,6 +73,55 @@ except ImportError:  # azure-ai-evaluation 1.17.x (backward compat; remove when 
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_response_if_applicable(response):
+    """Parse ``response`` as JSON when it is a JSON-encoded string of chat messages.
+
+    If ``response`` is a string that successfully parses as JSON into a list, the parsed
+    list is returned so it can be handled by the existing message-list preprocessing path.
+    Any other input (a plain string, an already-parsed list, or a string that fails to
+    parse as JSON) is returned unchanged.
+
+    :param response: The raw response value from the eval input.
+    :type response: Any
+    :return: The parsed list of messages, or the original response if it is not a
+        JSON-encoded list.
+    :rtype: Any
+    """
+    if isinstance(response, str):
+        try:
+            parsed = json.loads(response)
+        except (ValueError, TypeError):
+            return response
+        if isinstance(parsed, list):
+            return parsed
+    return response
+
+
+def _extract_final_text_response(response):
+    """Flatten a preprocessed list of chat messages into plain assistant text.
+
+    Only the ``text`` content of ``assistant`` role messages is collected; tool
+    calls, tool results, and any other message types are dropped so the evaluator
+    only ever scores the final plain-text agent response. Non-list inputs (e.g. an
+    already plain-string response) are returned unchanged.
+
+    :param response: A preprocessed list of chat-message dicts, or a plain string.
+    :type response: Any
+    :return: The joined plain text of all assistant messages, or the original
+        ``response`` if it is not a list.
+    :rtype: Any
+    """
+    if not isinstance(response, list):
+        return response
+    text_lines = []
+    for msg in response:
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            for content in msg.get("content", []) or []:
+                if isinstance(content, dict) and "text" in content:
+                    text_lines.append(content["text"])
+    return "\n".join(text_lines)
 
 
 class FluencyEvaluator(PromptyEvaluatorBase[Union[str, float]]):
@@ -181,6 +247,10 @@ class FluencyEvaluator(PromptyEvaluatorBase[Union[str, float]]):
         :rtype: Dict[str, Union[float, Dict[str, List[float]]]]
         """
 
+    @overload
+    def __call__(self, *, messages: List[dict]) -> Dict[str, Union[str, float]]:
+        """Evaluate fluency using messages split at the latest user turn."""
+
     @override
     def __call__(  # pylint: disable=docstring-missing-param
         self,
@@ -259,6 +329,7 @@ class FluencyEvaluator(PromptyEvaluatorBase[Union[str, float]]):
         if isinstance(eval_input.get("query"), list):
             eval_input["query"] = _preprocess_messages(eval_input["query"])
         # Call the prompty flow to get the evaluation result.
+        eval_input.pop("messages", None)
         prompty_output_dict = await self._flow(timeout=self._LLM_CALL_TIMEOUT, **eval_input)
         score = math.nan
         reason = ""
@@ -334,6 +405,20 @@ class FluencyEvaluator(PromptyEvaluatorBase[Union[str, float]]):
         :return: The evaluation result.
         :rtype: Union[DoEvalResult[T_EvalValue], AggregateResult[T_EvalValue]]
         """
+        messages = kwargs.pop("messages", None)
+        if messages is not None:
+            try:
+                query_messages, response_messages = _split_messages_at_latest_user(messages)
+            except ValueError as exc:
+                raise EvaluationException(
+                    message=str(exc),
+                    blame=ErrorBlame.USER_ERROR,
+                    category=ErrorCategory.INVALID_VALUE,
+                    target=ErrorTarget.FLUENCY_EVALUATOR,
+                ) from exc
+            kwargs["query"] = query_messages
+            kwargs["response"] = response_messages
+
         # Validate input before processing
         self._validator.validate_eval_input(kwargs)
 
@@ -414,6 +499,8 @@ class FluencyEvaluator(PromptyEvaluatorBase[Union[str, float]]):
         :return: The evaluation result.
         :rtype: Dict
         """
+        eval_input["response"] = _parse_json_response_if_applicable(eval_input.get("response"))
+
         if _is_intermediate_response(eval_input.get("response")):
             return self._return_not_applicable_result(
                 "Intermediate response. Please provide the agent's final response for evaluation.",
@@ -422,7 +509,7 @@ class FluencyEvaluator(PromptyEvaluatorBase[Union[str, float]]):
         if isinstance(eval_input.get("response"), list):
             eval_input["response"] = _preprocess_messages(eval_input["response"])
 
-        eval_input["response"] = reformat_agent_response(eval_input.get("response"), logger)
+        eval_input["response"] = _extract_final_text_response(eval_input.get("response"))
 
         result = await self._the_super_do_eval(eval_input)
 

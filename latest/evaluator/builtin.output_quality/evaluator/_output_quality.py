@@ -1,8 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Quality Composite Evaluator."""
-
+"""Output Quality Evaluator."""
+import contextvars
+import functools
 import logging
 import os
 from enum import Enum
@@ -106,7 +107,12 @@ except ImportError:  # azure-ai-evaluation 1.17.x (backward compat; remove when 
             default=-1,
         )
         if latest_user_index == -1:
-            raise ValueError("messages must contain at least one message with role 'user'.")
+            raise EvaluationException(
+                message="messages must contain at least one message with role 'user'.",
+                blame=ErrorBlame.USER_ERROR,
+                category=ErrorCategory.INVALID_VALUE,
+                target=ErrorTarget.EVALUATE,
+            )
         return messages[:latest_user_index + 1], messages[latest_user_index + 1:]
 
     def _wrap_string_messages(query: str, response: str) -> Tuple[List[dict], List[dict]]:
@@ -322,11 +328,123 @@ else:
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Cached-token capture.
+#
+# Neither the promptflow ``AsyncPrompty`` nor the azure-ai-evaluation legacy
+# ``AsyncPrompty`` surfaces ``usage.prompt_tokens_details.cached_tokens`` in the
+# dict they return, so prompt-cache savings are invisible to this registry code
+# evaluator. Both flows ultimately call ``AsyncCompletions.create`` from the
+# ``openai`` package, so we wrap that method once and stash the cached-token
+# count for the current async context.
+# ---------------------------------------------------------------------------
+
+_CACHED_TOKENS: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "evaluator_cached_tokens", default=None
+)
+# Vienna/ACA prompt-cache enrichment reads this property name from evaluator
+# result properties and moves it into ``sample.usage.cached_tokens``.
+PROMPT_CACHE_CACHED_TOKENS_PROPERTY = "_raisvc_prompt_cache_cached_tokens"
+
+_CAPTURE_MARKER = "_azureml_assets_captures_cached_tokens"
+_CAPTURE_CONTEXTVARS = "_azureml_assets_cached_token_contextvars"
+
+
+def _extract_cached_tokens(response: Any) -> Optional[int]:
+    """Read ``usage.prompt_tokens_details.cached_tokens`` from a response."""
+    usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    if usage is None:
+        return None
+    details = (
+        usage.get("prompt_tokens_details")
+        if isinstance(usage, dict)
+        else getattr(usage, "prompt_tokens_details", None)
+    )
+    if details is None:
+        return None
+    cached_tokens = (
+        details.get("cached_tokens")
+        if isinstance(details, dict)
+        else getattr(details, "cached_tokens", None)
+    )
+    return cached_tokens if isinstance(cached_tokens, int) and not isinstance(cached_tokens, bool) else None
+
+
+def _register_cached_token_contextvar(create) -> None:
+    """Register this module's context var on an already installed capture wrapper."""
+    contextvars_list = getattr(create, _CAPTURE_CONTEXTVARS)
+    if _CACHED_TOKENS not in contextvars_list:
+        contextvars_list.append(_CACHED_TOKENS)
+
+
+def _make_capture_wrapper(delegate, registered_contextvars):
+    """Wrap ``delegate`` so cached prompt tokens land in the registered context vars."""
+    # ``updated=()`` keeps ``functools.wraps`` from copying the tracing wrapper's
+    # ``_original`` attribute onto this wrapper; otherwise the SDK/promptflow
+    # ``recover_openai_api()`` call could restore the untraced method and silently
+    # drop cached-token capture while an evaluation is still running.
+    @functools.wraps(delegate, updated=())
+    async def create(self, *args, **kwargs):
+        response = await delegate(self, *args, **kwargs)
+        cached_tokens = _extract_cached_tokens(response)
+        if cached_tokens is not None:
+            for contextvar in registered_contextvars:
+                contextvar.set(cached_tokens)
+        return response
+
+    setattr(create, _CAPTURE_MARKER, True)
+    setattr(create, _CAPTURE_CONTEXTVARS, registered_contextvars)
+    return create
+
+
+def install_cached_token_capture() -> None:
+    """Install an idempotent wrapper for this evaluator's Prompty calls."""
+    try:
+        from openai.resources.chat.completions import AsyncCompletions
+    except ImportError:  # pragma: no cover - openai is a hard dependency of the prompty flows
+        return
+
+    current_create = getattr(AsyncCompletions, "create", None)
+    if current_create is None:
+        return
+    if getattr(current_create, _CAPTURE_MARKER, False):
+        _register_cached_token_contextvar(current_create)
+        return
+
+    registered_contextvars = [_CACHED_TOKENS]
+    wrapped_create = _make_capture_wrapper(current_create, registered_contextvars)
+
+    # Tracing wrappers expose the pre-tracing method through ``_original`` and
+    # restore it during recovery. Point that recovery target at a capture wrapper
+    # so a concurrent run's recovery cannot strip cached-token capture.
+    recovery_target = getattr(current_create, "_original", None)
+    if recovery_target is not None:
+        setattr(
+            wrapped_create,
+            "_original",
+            _make_capture_wrapper(recovery_target, registered_contextvars),
+        )
+
+    AsyncCompletions.create = wrapped_create
+
+
+def clear_cached_tokens() -> None:
+    """Clear cached-token usage before starting an evaluator call."""
+    _CACHED_TOKENS.set(None)
+
+
+def get_cached_tokens() -> Optional[int]:
+    """Return cached-token usage captured in the current async context."""
+    return _CACHED_TOKENS.get()
+
+
+install_cached_token_capture()
+
 
 def _create_extended_error_target():
-    """Create an extended ErrorTarget enum for QualityCompositeEvaluator."""
+    """Create an extended ErrorTarget enum for OutputQualityEvaluator."""
     existing_members = {member.name: member.value for member in ErrorTarget}
-    existing_members["QUALITY_COMPOSITE_EVALUATOR"] = "QualityCompositeEvaluator"
+    existing_members["OUTPUT_QUALITY_EVALUATOR"] = "OutputQualityEvaluator"
     return Enum("ExtendedErrorTarget", existing_members)
 
 
@@ -344,27 +462,27 @@ _EVALUATORS: Tuple[Dict[str, Union[str, int]], ...] = (
 
 
 @experimental
-class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
+class OutputQualityEvaluator(PromptyEvaluatorBase[Union[str, int]]):
     """Batch six quality evaluators into one LLM call.
 
-    The suite preserves the member evaluators' LLM results and derived threshold/pass
-    fields exclusively under ``quality_composite_evaluators``. The primary
-    ``quality_composite`` result is an any-fail aggregate: it passes only when
-    every evaluated member meets its configured threshold.
+    Raw member evaluator objects are preserved under ``output_quality_evaluators``.
+    Converter-compatible member fields are also emitted as flat, member-prefixed keys.
+    The primary ``output_quality`` result is an any-fail aggregate: it passes only
+    when every evaluated member meets its configured threshold.
     """
 
-    _PROMPTY_FILE = "quality_composite.prompty"
-    _MULTI_TURN_PROMPTY_FILE = "quality_composite_multi_turn.prompty"
-    _RESULT_KEY = "quality_composite"
+    _PROMPTY_FILE = "output_quality.prompty"
+    _MULTI_TURN_PROMPTY_FILE = "output_quality_multi_turn.prompty"
+    _RESULT_KEY = "output_quality"
     _OPTIONAL_PARAMS = ["messages", "tool_definitions"]
     _EVALUATORS = _EVALUATORS
 
     _validator: ValidatorInterface
-    id = "azureai://built-in/evaluators/quality_composite"
+    id = "azureai://built-in/evaluators/output_quality"
 
     @override
     def __init__(self, model_config, *, credential=None, evaluation_level=None, threshold=None, **kwargs):
-        """Initialize the Quality Composite Evaluator."""
+        """Initialize the Output Quality Evaluator."""
         current_dir = os.path.dirname(__file__)
         prompty_path = os.path.join(current_dir, self._PROMPTY_FILE)
         threshold_value = {
@@ -374,10 +492,10 @@ class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
             threshold_value.update({name: value for name, value in threshold.items() if name in threshold_value})
 
         self._evaluation_level = _resolve_evaluation_level(
-            evaluation_level, ExtendedErrorTarget.QUALITY_COMPOSITE_EVALUATOR
+            evaluation_level, ExtendedErrorTarget.OUTPUT_QUALITY_EVALUATOR
         )
         self._validator = MessagesOrQueryResponseInputValidator(
-            error_target=ExtendedErrorTarget.QUALITY_COMPOSITE_EVALUATOR,
+            error_target=ExtendedErrorTarget.OUTPUT_QUALITY_EVALUATOR,
             requires_query=False,
             enforce_tool_definitions=False,
         )
@@ -465,7 +583,7 @@ class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
                     message=f"Invalid score value for {name}: {score}.",
                     blame=ErrorBlame.SYSTEM_ERROR,
                     category=ErrorCategory.FAILED_EXECUTION,
-                    target=ExtendedErrorTarget.QUALITY_COMPOSITE_EVALUATOR,
+                    target=ExtendedErrorTarget.OUTPUT_QUALITY_EVALUATOR,
                 )
             if score < evaluator["min"] or score > evaluator["max"]:
                 raise EvaluationException(
@@ -475,7 +593,7 @@ class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
                     ),
                     blame=ErrorBlame.SYSTEM_ERROR,
                     category=ErrorCategory.FAILED_EXECUTION,
-                    target=ExtendedErrorTarget.QUALITY_COMPOSITE_EVALUATOR,
+                    target=ExtendedErrorTarget.OUTPUT_QUALITY_EVALUATOR,
                 )
             evaluator_output["passed"] = score >= threshold
             normalized_evaluators[name] = evaluator_output
@@ -518,6 +636,17 @@ class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
             f"{self._RESULT_KEY}_properties": aggregate_properties,
             f"{self._RESULT_KEY}_evaluators": normalized_evaluators,
         }
+        # The SDK converter derives `passed` from `<member>_result`; it does not
+        # recognize `<member>_passed`, and skipped members must remain unset.
+        for name, member_output in normalized_evaluators.items():
+            member_passed = member_output.get("passed")
+            result[f"{name}_score"] = member_output.get("score")
+            result[f"{name}_reason"] = member_output.get("reason")
+            result[f"{name}_threshold"] = member_output.get("threshold")
+            result[f"{name}_status"] = member_output.get("status")
+            if member_passed is not None:
+                result[f"{name}_result"] = EVALUATION_PASS_FAIL_MAPPING[member_passed]
+
         result.update({f"{self._RESULT_KEY}_{key}": value for key, value in token_metadata.items()})
         return result
 
@@ -536,7 +665,8 @@ class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
     @staticmethod
     def _get_token_metadata(prompty_output: Dict) -> Dict:
         """Extract token usage and model metadata from a prompty output."""
-        return {
+        cached_tokens = prompty_output.get("cached_tokens", get_cached_tokens())
+        metadata = {
             "prompt_tokens": prompty_output.get("input_token_count", 0),
             "completion_tokens": prompty_output.get("output_token_count", 0),
             "total_tokens": prompty_output.get("total_token_count", 0),
@@ -545,6 +675,12 @@ class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
             "sample_input": prompty_output.get("sample_input", ""),
             "sample_output": prompty_output.get("sample_output", ""),
         }
+        # Leave the field absent rather than reporting a real 0 when the service
+        # did not return cached-token telemetry at all.
+        if cached_tokens is not None:
+            metadata["cached_tokens"] = cached_tokens
+            metadata[PROMPT_CACHE_CACHED_TOKENS_PROPERTY] = cached_tokens
+        return metadata
 
     @override
     async def _real_call(self, **kwargs):
@@ -594,20 +730,23 @@ class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
     @override
     async def _do_eval(self, eval_input: Dict) -> Dict[str, Union[int, str]]:
         """Evaluate one turn or one full conversation."""
+        # Clear any cached-token value carried over from a previous LLM call so a
+        # stale count is never attributed to this evaluation.
+        clear_cached_tokens()
         if self._should_use_conversation_level(eval_input):
             return await self._do_eval_conversation_level(eval_input)
 
         if eval_input.get("response") is None:
             raise EvaluationException(
                 message=(
-                    "A response must be provided as input to the Quality Composite Evaluator."
+                    "A response must be provided as input to the Output Quality Evaluator."
                 ),
                 internal_message=(
-                    "A response must be provided as input to the Quality Composite Evaluator."
+                    "A response must be provided as input to the Output Quality Evaluator."
                 ),
                 blame=ErrorBlame.USER_ERROR,
                 category=ErrorCategory.MISSING_FIELD,
-                target=ExtendedErrorTarget.QUALITY_COMPOSITE_EVALUATOR,
+                target=ExtendedErrorTarget.OUTPUT_QUALITY_EVALUATOR,
             )
         if eval_input.get("query") is None:
             eval_input["query"] = []
@@ -647,7 +786,7 @@ class QualityCompositeEvaluator(PromptyEvaluatorBase[Union[str, int]]):
                 message="Evaluator returned invalid output.",
                 blame=ErrorBlame.SYSTEM_ERROR,
                 category=ErrorCategory.FAILED_EXECUTION,
-                target=ExtendedErrorTarget.QUALITY_COMPOSITE_EVALUATOR,
+                target=ExtendedErrorTarget.OUTPUT_QUALITY_EVALUATOR,
             )
 
         evaluators: Dict[str, Dict] = {}

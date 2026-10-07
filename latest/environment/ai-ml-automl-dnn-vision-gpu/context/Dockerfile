@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/aifx/acpt/stable-ubuntu2204-cu126-py310-torch280:biweekly.202608.2
+FROM mcr.microsoft.com/aifx/acpt/stable-ubuntu2204-cu126-py310-torch280:biweekly.202610.1
 
 ENV AZUREML_CONDA_ENVIRONMENT_PATH=/azureml-envs/azureml-automl-dnn-vision-gpu
 ENV PATH=$AZUREML_CONDA_ENVIRONMENT_PATH/bin:$PATH
@@ -89,7 +89,7 @@ RUN conda create -p $AZUREML_CONDA_ENVIRONMENT_PATH \
 # Install pip dependencies. azureml-inference-server-http stays on the 1.4.x line
 # required by azureml-defaults to avoid resolving newer inference server extras.
 RUN pip install --no-cache-dir --use-deprecated=legacy-resolver \
-                azureml-mlflow==1.62.0.post5 \
+                azureml-mlflow==1.62.0.post6 \
                 azureml-dataset-runtime==1.62.0.post1 \
                 azureml-telemetry==1.62.0 \
                 azureml-responsibleai==1.62.0 \
@@ -106,7 +106,7 @@ RUN pip install --no-cache-dir --use-deprecated=legacy-resolver \
 RUN pip install --no-cache-dir --use-deprecated=legacy-resolver \
                 azureml-train-automl-client==1.62.0 \
                 azureml-train-automl-runtime==1.62.0 \
-                azureml-automl-dnn-vision==1.62.0
+                azureml-automl-dnn-vision==1.62.0.post1
 
 # Vulnerability patches for conda environment
 # NOTE: cryptography>=48.0.1 (GHSA-537c-gmf6-5ccf): azureml-mlflow==1.62.0.post2
@@ -227,6 +227,7 @@ RUN conda run -n base pip install --no-cache-dir --upgrade \
                 'idna>=3.15' \
                 'click>=8.3.3' \
                 'aiohttp>=3.14.0' \
+                'anyio>=4.14.2' \
                 'PyJWT>=2.13.0' \
                 'py-rattler>=0.24.0' \
                 'cryptography>=48.0.1' \

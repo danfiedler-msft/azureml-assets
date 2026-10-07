@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/aifx/acpt/stable-ubuntu2204-cu126-py310-torch280:biweekly.202608.2
+FROM mcr.microsoft.com/aifx/acpt/stable-ubuntu2204-cu126-py310-torch280:biweekly.202610.1
 
 USER root
 
@@ -43,16 +43,32 @@ RUN apt-get -y update && \
     apt-get install -y --no-install-recommends unzip && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip to the patched 26.1 line in both envs to fix GHSA-jp4c-xjxw-mgf9 (bootstrap
+# Upgrade pip to the patched 26.2 line in both envs to fix GHSA-jp4c-xjxw-mgf9 (bootstrap
 # installer, no parent to bump). Installed from PyPI; stale conda-meta JSON removed so the
 # SBOM scanner doesn't re-flag it. Done before requirements so later installs use patched pip.
-RUN pip install --no-cache-dir --upgrade 'pip>=26.1.2,<27' && \
+RUN pip install --no-cache-dir --upgrade 'pip>=26.2.0,<27' && \
     rm -f /opt/conda/envs/ptca/conda-meta/pip-*.json && \
-    /opt/conda/bin/python -m pip install --no-cache-dir --upgrade 'pip>=26.1.2,<27' && \
+    /opt/conda/bin/python -m pip install --no-cache-dir --upgrade 'pip>=26.2.0,<27' && \
     rm -f /opt/conda/conda-meta/pip-*.json
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt --no-cache-dir
+
+# ptca env torch is inherited from the ACPT torch280 base image; pin the patched CUDA build for
+# GHSA-qfhq-4f3w-5fph, GHSA-vgrw-7cvw-pwgx, and GHSA-rrmf-rvhw-rf47. Keep torchvision aligned
+# with torch; remove torchaudio because no compatible 2.13 CUDA wheel is available.
+RUN /opt/conda/envs/ptca/bin/python -m pip install --no-cache-dir --upgrade \
+        --progress-bar off \
+        --index-url https://download.pytorch.org/whl/cu126 \
+        'torch==2.13.0+cu126' \
+        'torchvision==0.28.0+cu126' && \
+    /opt/conda/envs/ptca/bin/python -m pip uninstall -y torchaudio && \
+    rm -rf /opt/conda/envs/ptca/lib/python3.10/site-packages/torch-2.8*.dist-info \
+           /opt/conda/envs/ptca/lib/python3.10/site-packages/torch-2.10*.dist-info \
+           /opt/conda/envs/ptca/lib/python3.10/site-packages/torchvision-0.23*.dist-info \
+           /opt/conda/envs/ptca/lib/python3.10/site-packages/torchvision-0.25*.dist-info \
+           /opt/conda/envs/ptca/lib/python3.10/site-packages/torchaudio \
+           /opt/conda/envs/ptca/lib/python3.10/site-packages/torchaudio-*.dist-info
 
 # ptca-env (py3.10) transitive deps pip won't auto-upgrade; no parent floors the safe versions:
 # Mako>=1.3.11 (GHSA-v92g-xgxw-vvmm), GitPython>=3.1.58 (GHSA-x2qx-6953-8485, GHSA-rpm5-65cw-6hj4,
@@ -87,7 +103,8 @@ RUN pip install --no-cache-dir --upgrade 'Mako>=1.3.11' 'GitPython>=3.1.58' 'pyt
 # setuptools: bootstrapped by the ACPT base conda image; fixes GHSA-h35f-9h28-mq5c.
 # msgpack: the base conda prefix carries its own copy that the ptca pin above never reaches;
 #   fixes GHSA-6v7p-g79w-8964.
-RUN /opt/conda/bin/python -m pip install --no-cache-dir --upgrade 'python-dotenv>=1.2.2' 'urllib3>=2.7.0' 'idna>=3.15' 'click>=8.3.3' 'aiohttp>=3.14.3' 'PyJWT>=2.13.0' 'py-rattler>=0.24.0' 'cryptography>=50.0.0' 'pydantic-settings>=2.14.2' 'pyasn1>=0.6.4' 'setuptools>=83.0.0' 'msgpack>=1.2.1'
+# anyio: base-prefix dependency; fixes GHSA-5p39-cfhj-2xmp and GHSA-82r6-8w77-94w6.
+RUN /opt/conda/bin/python -m pip install --no-cache-dir --upgrade 'python-dotenv>=1.2.2' 'urllib3>=2.7.0' 'idna>=3.15' 'click>=8.3.3' 'aiohttp>=3.14.3' 'PyJWT>=2.13.0' 'py-rattler>=0.24.0' 'cryptography>=50.0.0' 'pydantic-settings>=2.14.2' 'pyasn1>=0.6.4' 'setuptools>=83.0.0' 'msgpack>=1.2.1' 'anyio>=4.14.2'
 
 # pip vendors its own copies of setuptools and msgpack and declares them in
 # pip/_vendor/bom.cdx.json, which the scanner reports as setuptools 70.3.0

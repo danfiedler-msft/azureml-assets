@@ -1,16 +1,17 @@
 $schema: https://azuremlschemas.azureedge.net/latest/model.schema.json
 name: parakeet-tdt-0.6b-v2-generic-cpu
 path: ./
-isArchived: true
 tags:
   capabilities: ''
   supportsReasoning: ''
   contextLength: 0
 system_metadata:
+  previewType: hideUI
   alias: parakeet-tdt-0.6b-v2
   publisher: Microsoft
   directoryPath: v1
   foundryLocal: ''
+  deploymentOptions: ['Foundry Local on Devices']
   inputModalities:
   - audio
   license: MIT

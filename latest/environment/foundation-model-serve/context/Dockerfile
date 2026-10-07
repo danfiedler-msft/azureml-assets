@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/azureml/openmpi5.0-cuda13.1-ubuntu24.04:20260810.v1
+FROM mcr.microsoft.com/azureml/openmpi5.0-cuda13.1-ubuntu24.04:20260929.v1
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -21,6 +21,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/nvidia/lib:/usr/local/nvid
 # git is needed by some pip editable installs / VCS deps.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git && \
+    apt-get install -y --only-upgrade linux-libc-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Create the AzureML-conventional conda environment so app deps stay isolated from the
@@ -46,8 +47,6 @@ RUN python3.12 -m pip install -e ./ --no-cache-dir && \
     rm -rf ~/.cache/pip
 
 # pip ships an internal bom.cdx.json documenting old vendored msgpack/setuptools
-# versions (unrelated to installed site-packages); strip it so scanners don't
-# flag it as a live vulnerable package.
 RUN find / -path "*/pip/_vendor/bom.cdx.json" -delete 2>/dev/null || true
 
 # The MCR base ships its AzureML scoring services (gunicorn/nginx/rsyslog)

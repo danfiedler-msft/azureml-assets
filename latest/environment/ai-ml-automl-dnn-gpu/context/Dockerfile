@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/azureml/openmpi5.0-cuda12.4-ubuntu22.04:20260810.v1
+FROM mcr.microsoft.com/azureml/openmpi5.0-cuda12.4-ubuntu22.04:20260929.v1
 
 USER root
 
@@ -63,11 +63,6 @@ RUN pip install --upgrade lightgbm==4.6.0
 
 RUN pip install --upgrade --force-reinstall xgboost==1.5.2 pandas==1.5.3
 
-# Install ncurses via conda (C library, not available on pip; single-package solve is trivial)
-RUN conda install -p $AZUREML_CONDA_ENVIRONMENT_PATH \
-    ncurses=6.5 \
-    -c conda-forge -y
-
 # Install packages via pip (avoids conda solver OOM)
 RUN pip install --no-cache-dir \
     'numpy>=1.23.5,<1.24' \
@@ -93,7 +88,7 @@ RUN pip install \
                 azureml-automl-core==1.62.0.post3 \
                 azureml-automl-runtime==1.62.0.post1 \
                 azureml-dataset-runtime==1.62.0.post1 \
-                azureml-mlflow==1.62.0.post5 \
+                azureml-mlflow==1.62.0.post6 \
                 'azureml-model-management-sdk==1.0.1b6.post1' \
                 'mlflow-skinny==2.15.1' --no-cache-dir
 

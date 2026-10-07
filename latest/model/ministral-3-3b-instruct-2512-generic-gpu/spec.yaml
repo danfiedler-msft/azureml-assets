@@ -1,16 +1,17 @@
 $schema: https://azuremlschemas.azureedge.net/latest/model.schema.json
 name: ministral-3-3b-instruct-2512-generic-gpu
 path: ./
-isArchived: true
 tags:
   capabilities: tool-calling
   supportsReasoning: ''
   contextLength: 262144
 system_metadata:
+  previewType: hideUI
   alias: ministral-3-3b-instruct-2512
   publisher: Microsoft
-  directoryPath: v1
+  directoryPath: v2
   foundryLocal: ''
+  deploymentOptions: ['Foundry Local on Devices']
   inputModalities:
   - text
   - image
@@ -47,9 +48,9 @@ variantInfo:
     - RTN
     device: gpu
     executionProvider: WebGPUExecutionProvider
-    fileSizeBytes: 3857775303
-    vRamFootprintBytes: 3857775303
-version: 1
+    fileSizeBytes: 3857775187
+    vRamFootprintBytes: 3857775187
+version: 2
 description: |-
   This model is an optimized version of Ministral-3-3B-Instruct-2512 for local inference on WebGPU-capable devices. This optimized model is published here in ONNX format to run with the WebGPU execution provider, with the precision best suited to this target.
 

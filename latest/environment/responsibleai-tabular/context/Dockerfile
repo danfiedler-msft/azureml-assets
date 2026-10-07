@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/azureml/openmpi5.0-ubuntu24.04:20260810.v1
+FROM mcr.microsoft.com/azureml/openmpi5.0-ubuntu24.04:20260929.v1
 
 # Install wkhtmltopdf with statically linked Qt to avoid system Qt5 vulnerabilities (USN-8076-1)
 RUN apt-get -y update && apt-get -y install --no-install-recommends xfonts-75dpi xfonts-base fontconfig libxrender1 libxext6 && \
@@ -33,7 +33,7 @@ RUN pip install --no-deps 'charset-normalizer==2.0.12' \
 
 # Install azureml packages
 RUN pip install 'azureml-dataset-runtime==1.62.0.post1' \
-                'azureml-mlflow==1.62.0.post5' \
+                'azureml-mlflow==1.62.0.post6' \
                 'azureml-rai-utils==0.0.7' \
                 'numpy<1.24.0' 'pandas<2.0.0'
 

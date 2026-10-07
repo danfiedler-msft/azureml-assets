@@ -6,7 +6,7 @@ import logging
 import math
 import os
 import re
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Union
 from typing_extensions import overload, override
 
 from azure.ai.evaluation._evaluators._common._base_prompty_eval import PromptyEvaluatorBase
@@ -166,6 +166,23 @@ class RetrievalEvaluator(PromptyEvaluatorBase[Union[str, float]]):
     def __call__(
         self,
         *,
+        query: Union[str, List[dict]],
+        response: List[dict],
+    ) -> Dict[str, Union[str, float]]:
+        """Evaluate retrieval using context extracted from the response.
+
+        :keyword query: The query text or query-side messages.
+        :paramtype query: Union[str, List[dict]]
+        :keyword response: Response-side messages containing tool outputs.
+        :paramtype response: List[dict]
+        :return: The retrieval evaluation result.
+        :rtype: Dict[str, Union[str, float]]
+        """
+
+    @overload
+    def __call__(
+        self,
+        *,
         conversation: Conversation,
     ) -> Dict[str, Union[float, Dict[str, List[Union[str, float]]]]]:
         """Evaluate retrieval for a multi-turn evaluation.
@@ -183,7 +200,7 @@ class RetrievalEvaluator(PromptyEvaluatorBase[Union[str, float]]):
     def __call__(self, *args, **kwargs):  # pylint: disable=docstring-missing-param
         """Evaluate retrieval score chat scenario.
 
-        Accepts either a query and context for a single evaluation,
+        Accepts query and context, query and response, or messages for a single evaluation,
         or a conversation for a multi-turn evaluation. If the conversation has more than one turn,
         the evaluator will aggregate the results of each turn.
 
@@ -191,12 +208,188 @@ class RetrievalEvaluator(PromptyEvaluatorBase[Union[str, float]]):
         :paramtype query: Optional[str]
         :keyword context: The context to be evaluated. Mutually exclusive with `conversation` parameter.
         :paramtype context: Optional[str]
+        :keyword response: Response-side messages containing tool outputs.
+        :paramtype response: Optional[List[dict]]
         :keyword conversation: The conversation to be evaluated.
         :paramtype conversation: Optional[~azure.ai.evaluation.Conversation]
         :return: The scores for Chat scenario.
         :rtype: :rtype: Dict[str, Union[float, Dict[str, List[str, float]]]]
         """
         return super().__call__(*args, **kwargs)
+
+    @override
+    def _convert_kwargs_to_eval_input(self, **kwargs) -> List[Dict]:
+        """Convert conversation messages into query/context retrieval turns."""
+        messages = kwargs.pop("messages", None)
+        conversation = kwargs.get("conversation")
+        if messages is None and conversation is not None:
+            if isinstance(conversation, dict):
+                messages = conversation.get("messages")
+            else:
+                messages = getattr(conversation, "messages", None)
+            if messages is not None:
+                kwargs.pop("conversation")
+        if messages is None:
+            response = kwargs.pop("response", None)
+            if response is not None and not kwargs.get("context"):
+                return self._convert_query_response(kwargs.get("query"), response)
+            return super()._convert_kwargs_to_eval_input(**kwargs)
+        if not isinstance(messages, list) or not messages:
+            raise EvaluationException(
+                message="RetrievalEvaluator: 'messages' must be a non-empty list.",
+                blame=ErrorBlame.USER_ERROR,
+                category=ErrorCategory.INVALID_VALUE,
+                target=ErrorTarget.RETRIEVAL_EVALUATOR,
+            )
+
+        explicit_context = kwargs.pop("context", None)
+        explicit_query = kwargs.pop("query", None)
+        if explicit_context:
+            query = explicit_query or self._get_latest_user_query(messages)
+            return [{"query": query, "context": explicit_context}]
+
+        eval_inputs = self._extract_retrieval_turns(messages)
+        if not eval_inputs:
+            raise EvaluationException(
+                message=(
+                    "RetrievalEvaluator: No valid context was provided or could be "
+                    "extracted from tool outputs in 'messages'."
+                ),
+                blame=ErrorBlame.USER_ERROR,
+                category=ErrorCategory.NOT_APPLICABLE,
+                target=ErrorTarget.RETRIEVAL_EVALUATOR,
+            )
+        if explicit_query and len(eval_inputs) == 1:
+            eval_inputs[0]["query"] = explicit_query
+        return eval_inputs
+
+    @classmethod
+    def _convert_query_response(cls, query: Any, response: Any) -> List[Dict]:
+        """Build one retrieval input from a query and the tool outputs in its response messages."""
+        if not isinstance(response, list) or not isinstance(query, (str, list)):
+            raise EvaluationException(
+                message=(
+                    "RetrievalEvaluator: 'query' must be a string or a list of messages and "
+                    "'response' must be a list of messages."
+                ),
+                blame=ErrorBlame.USER_ERROR,
+                category=ErrorCategory.INVALID_VALUE,
+                target=ErrorTarget.RETRIEVAL_EVALUATOR,
+            )
+        query_text = query if isinstance(query, str) else cls._get_latest_user_query(query)
+        context = cls._extract_response_context(response)
+        if not query_text or not context:
+            raise EvaluationException(
+                message=(
+                    "RetrievalEvaluator: No valid query or tool output could be "
+                    "extracted from 'query' and 'response'."
+                ),
+                blame=ErrorBlame.USER_ERROR,
+                category=ErrorCategory.NOT_APPLICABLE,
+                target=ErrorTarget.RETRIEVAL_EVALUATOR,
+            )
+        return [{"query": query_text, "context": context}]
+
+    @classmethod
+    def _extract_retrieval_turns(cls, messages: List[Dict[str, Any]]) -> List[Dict]:
+        """Build one retrieval input for each user turn containing tool output."""
+        turns: List[Dict] = []
+        query = ""
+        context_parts: List[str] = []
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role == "user":
+                cls._append_retrieval_turn(turns, query, context_parts)
+                query = cls._extract_message_text(message.get("content"))
+                context_parts = []
+            elif role == "tool" and query:
+                context_parts.extend(cls._extract_tool_message_context(message.get("content")))
+
+        cls._append_retrieval_turn(turns, query, context_parts)
+        return turns
+
+    @staticmethod
+    def _append_retrieval_turn(turns: List[Dict], query: str, context_parts: List[str]) -> None:
+        """Append a retrieval turn when both query and tool context are present."""
+        context = "\n\n".join(part for part in context_parts if part)
+        if query and context:
+            turns.append({"query": query, "context": context})
+
+    @classmethod
+    def _get_latest_user_query(cls, messages: List[Dict[str, Any]]) -> str:
+        """Return the latest user text in a conversation."""
+        for message in reversed(messages):
+            if isinstance(message, dict) and message.get("role") == "user":
+                query = cls._extract_message_text(message.get("content"))
+                if query:
+                    return query
+        return ""
+
+    @staticmethod
+    def _extract_message_text(content: Any) -> str:
+        """Extract plain text from a normalized message content value."""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        text_parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") not in {"text", "input_text", "output_text"}:
+                continue
+            text = block.get("text") or block.get("content")
+            if isinstance(text, str) and text:
+                text_parts.append(text)
+        return "\n".join(text_parts)
+
+    @classmethod
+    def _extract_tool_message_context(cls, content: Any) -> List[str]:
+        """Serialize arbitrary tool output payloads without tool-name filtering."""
+        if isinstance(content, str):
+            return [content] if content else []
+        if not isinstance(content, list):
+            return []
+
+        context_parts = []
+        for block in content:
+            if isinstance(block, str):
+                context_parts.append(block)
+                continue
+            if not isinstance(block, dict) or block.get("type") == "tool_call":
+                continue
+            payload = block
+            for key in ("tool_result", "output", "response", "result", "content", "text"):
+                if key in block:
+                    payload = block[key]
+                    break
+            serialized = cls._stringify_tool_output(payload)
+            if serialized:
+                context_parts.append(serialized)
+        return context_parts
+
+    @classmethod
+    def _extract_response_context(cls, response: List[dict]) -> str:
+        """Extract retrieval context from response tool messages."""
+        context_parts = []
+        for message in response:
+            if isinstance(message, dict) and message.get("role") == "tool":
+                context_parts.extend(cls._extract_tool_message_context(message.get("content")))
+        return "\n\n".join(part for part in context_parts if part)
+
+    @staticmethod
+    def _stringify_tool_output(value: Any) -> str:
+        """Preserve plain text and deterministically serialize structured output."""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        if value is None:
+            return ""
+        return str(value)
 
     def _return_not_applicable_result(
         self, error_message: str, threshold: Union[int, float]

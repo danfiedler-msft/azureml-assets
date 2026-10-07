@@ -2,9 +2,10 @@
 # Licensed under the MIT License.
 
 import os
+import json
 import logging
 import math
-from typing import Dict, List, Union, Optional
+from typing import Dict, List, Union, Optional, Tuple
 
 from typing_extensions import overload, override
 
@@ -24,12 +25,30 @@ from azure.ai.evaluation._constants import EVALUATION_PASS_FAIL_MAPPING
 # ---------------------------------------------------------------------------
 
 try:  # azure-ai-evaluation >= 1.18.1
-    from azure.ai.evaluation._common.utils import _is_intermediate_response, _preprocess_messages
+    from azure.ai.evaluation._common.utils import (
+        _is_intermediate_response,
+        _preprocess_messages,
+        _split_messages_at_latest_user,
+    )
 except ImportError:  # azure-ai-evaluation 1.17.x (backward compat; remove when 1.17.x is dropped)  # pragma: no cover
     from azure.ai.evaluation._evaluators._common._base_prompty_eval import (
         _is_intermediate_response,
         _preprocess_messages,
     )
+
+    def _split_messages_at_latest_user(messages: List[dict]) -> Tuple[List[dict], List[dict]]:
+        latest_user_index = max(
+            (index for index, message in enumerate(messages) if message.get("role") == "user"),
+            default=-1,
+        )
+        if latest_user_index == -1:
+            raise EvaluationException(
+                message="messages must contain at least one message with role 'user'.",
+                blame=ErrorBlame.USER_ERROR,
+                category=ErrorCategory.INVALID_VALUE,
+                target=ErrorTarget.COMPLETENESS_EVALUATOR,
+            )
+        return messages[: latest_user_index + 1], messages[latest_user_index + 1:]
 
 # Re-exported so the module keeps exposing the message-preprocessing helpers used
 # by the test suite; they are invoked indirectly through _preprocess_messages.
@@ -45,6 +64,30 @@ except ImportError:  # azure-ai-evaluation 1.17.x (backward compat; remove when 
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_response_if_applicable(response):
+    """Parse ``response`` as JSON when it is a JSON-encoded string of chat messages.
+
+    If ``response`` is a string that successfully parses as JSON into a list, the parsed
+    list is returned so it can be handled by the existing message-list preprocessing path.
+    Any other input (a plain string, an already-parsed list, or a string that fails to
+    parse as JSON) is returned unchanged.
+
+    :param response: The raw response value from the eval input.
+    :type response: Any
+    :return: The parsed list of messages, or the original response if it is not a
+        JSON-encoded list.
+    :rtype: Any
+    """
+    if isinstance(response, str):
+        try:
+            parsed = json.loads(response)
+        except (ValueError, TypeError):
+            return response
+        if isinstance(parsed, list):
+            return parsed
+    return response
 
 
 @experimental
@@ -177,6 +220,10 @@ class ResponseCompletenessEvaluator(PromptyEvaluatorBase[Union[str, float]]):
         :rtype: Dict[str, Union[float, Dict[str, List[float]]]]
         """
 
+    @overload
+    def __call__(self, *, messages: List[dict], ground_truth: str) -> Dict[str, Union[str, float]]:
+        """Evaluate completeness using messages split at the latest user turn."""
+
     @override
     def __call__(  # pylint: disable=docstring-missing-param
         self,
@@ -252,6 +299,8 @@ class ResponseCompletenessEvaluator(PromptyEvaluatorBase[Union[str, float]]):
                 target=ErrorTarget.COMPLETENESS_EVALUATOR,
             )
 
+        eval_input["response"] = _parse_json_response_if_applicable(eval_input.get("response"))
+
         if _is_intermediate_response(eval_input.get("response")):
             return self._return_not_applicable_result(
                 "Intermediate response. Please provide the agent's final response for evaluation.",
@@ -311,6 +360,20 @@ class ResponseCompletenessEvaluator(PromptyEvaluatorBase[Union[str, float]]):
         :return: The evaluation result.
         :rtype: Union[DoEvalResult[T_EvalValue], AggregateResult[T_EvalValue]]
         """
+        messages = kwargs.pop("messages", None)
+        if messages is not None:
+            try:
+                query_messages, response_messages = _split_messages_at_latest_user(messages)
+            except ValueError as exc:
+                raise EvaluationException(
+                    message=str(exc),
+                    blame=ErrorBlame.USER_ERROR,
+                    category=ErrorCategory.INVALID_VALUE,
+                    target=ErrorTarget.COMPLETENESS_EVALUATOR,
+                ) from exc
+            kwargs["query"] = query_messages
+            kwargs["response"] = response_messages
+
         # Convert inputs into list of evaluable inputs.
         try:
             eval_input_list = self._convert_kwargs_to_eval_input(**kwargs)

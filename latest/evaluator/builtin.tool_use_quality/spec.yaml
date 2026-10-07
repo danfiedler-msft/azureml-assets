@@ -1,19 +1,17 @@
 type: "evaluator"
-id: "azureml://registries/azureml/evaluators/builtin.tool_use_composite/versions/1"
-name: "builtin.tool_use_composite"
-version: 1
-displayName: "Tool-Use-Composite-Evaluator-(Preview)"
+id: "azureml://registries/azureml/evaluators/builtin.tool_use_quality/versions/1"
+name: "builtin.tool_use_quality"
+version: 6
+displayName: "Tool Use Quality Evaluator"
 description: "A composite evaluator that batches the tool_call_accuracy, tool_call_success,
   tool_input_accuracy, tool_output_utilization, and tool_selection evaluators into
-  a single LLM call. The primary tool_use_composite score fails when any evaluated
-  evaluator fails, while the evaluator keys preserve the LLM results and derived pass/fail
-  fields. Supports both single-turn (query/response) and multi-turn (messages) agent
-  interactions."
+  a single LLM call."
 evaluatorType: "builtin"
 evaluatorSubType: "code"
 categories: ["agents"]
 tags:
   provider: "Microsoft"
+  recommended: "true"
   is_continuous_scenario: "true"
   composite_evaluator: "tool_call_accuracy, tool_call_success, tool_input_accuracy,
     tool_output_utilization, tool_selection"
@@ -60,7 +58,7 @@ dataMappingSchema:
   - required: ["query", "response", "tool_definitions"]
   - required: ["messages", "tool_definitions"]
 outputSchema:
-  tool_use_composite:
+  tool_use_quality:
     type: "boolean"
     desirable_direction: "increase"
     min_value: 0

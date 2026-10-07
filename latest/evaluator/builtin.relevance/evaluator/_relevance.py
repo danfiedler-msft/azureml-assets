@@ -4,7 +4,7 @@
 import logging
 import math
 import os
-from typing import Dict, Union, List
+from typing import Dict, Union, List, Tuple
 
 from typing_extensions import overload, override
 
@@ -33,12 +33,30 @@ from azure.ai.evaluation._evaluators._common._validators import (
 )
 
 try:  # azure-ai-evaluation >= 1.18.1
-    from azure.ai.evaluation._common.utils import _is_intermediate_response, _preprocess_messages
+    from azure.ai.evaluation._common.utils import (
+        _is_intermediate_response,
+        _preprocess_messages,
+        _split_messages_at_latest_user,
+    )
 except ImportError:  # azure-ai-evaluation 1.17.x (backward compat; remove when 1.17.x is dropped)  # pragma: no cover
     from azure.ai.evaluation._evaluators._common._base_prompty_eval import (
         _is_intermediate_response,
         _preprocess_messages,
     )
+
+    def _split_messages_at_latest_user(messages: List[dict]) -> Tuple[List[dict], List[dict]]:
+        latest_user_index = max(
+            (index for index, message in enumerate(messages) if message.get("role") == "user"),
+            default=-1,
+        )
+        if latest_user_index == -1:
+            raise EvaluationException(
+                message="messages must contain at least one message with role 'user'.",
+                blame=ErrorBlame.USER_ERROR,
+                category=ErrorCategory.INVALID_VALUE,
+                target=ErrorTarget.RELEVANCE_EVALUATOR,
+            )
+        return messages[: latest_user_index + 1], messages[latest_user_index + 1:]
 
 # Re-exported so the module keeps exposing the message-preprocessing helpers used
 # by the test suite; they are invoked indirectly through _preprocess_messages.
@@ -186,6 +204,10 @@ class RelevanceEvaluator(PromptyEvaluatorBase):
         :rtype: Dict[str, Union[float, Dict[str, List[float]]]]
         """
 
+    @overload
+    def __call__(self, *, messages: List[dict]) -> Dict[str, Union[str, float]]:
+        """Evaluate relevance using messages split at the latest user turn."""
+
     @override
     def __call__(  # pylint: disable=docstring-missing-param
         self,
@@ -260,6 +282,20 @@ class RelevanceEvaluator(PromptyEvaluatorBase):
         :return: The evaluation result.
         :rtype: Union[DoEvalResult[T_EvalValue], AggregateResult[T_EvalValue]]
         """
+        messages = kwargs.pop("messages", None)
+        if messages is not None:
+            try:
+                query_messages, response_messages = _split_messages_at_latest_user(messages)
+            except ValueError as exc:
+                raise EvaluationException(
+                    message=str(exc),
+                    blame=ErrorBlame.USER_ERROR,
+                    category=ErrorCategory.INVALID_VALUE,
+                    target=ErrorTarget.RELEVANCE_EVALUATOR,
+                ) from exc
+            kwargs["query"] = query_messages
+            kwargs["response"] = response_messages
+
         # Validate input before processing
         self._validator.validate_eval_input(kwargs)
 
@@ -365,6 +401,7 @@ class RelevanceEvaluator(PromptyEvaluatorBase):
             eval_input["query"] = reformat_conversation_history(eval_input["query"], logger)
         if not isinstance(eval_input["response"], str):
             eval_input["response"] = reformat_agent_response(eval_input["response"], logger)
+        eval_input.pop("messages", None)
         result = await self._flow(timeout=self._LLM_CALL_TIMEOUT, **eval_input)
         llm_output = result.get("llm_output", result)
         score = math.nan

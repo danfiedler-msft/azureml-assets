@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/azureml/openmpi5.0-ubuntu24.04:20260810.v1
+FROM mcr.microsoft.com/azureml/openmpi5.0-ubuntu24.04:20260929.v1
 
 ENV AZUREML_CONDA_ENVIRONMENT_PATH=/azureml-envs/azureml-automl-dnn
 ENV PATH=$AZUREML_CONDA_ENVIRONMENT_PATH/bin:$PATH
@@ -12,7 +12,7 @@ ENV ENABLE_METADATA=true
 # Upgrade vulnerable Ubuntu packages inherited from the base image when installed.
 RUN set -eux; \
     apt-get update; \
-    os_security_packages="libgssapi-krb5-2 libk5crypto3 libkrb5-3 libkrb5support0 libsqlite3-0 nginx nginx-common nginx-light tar wget"; \
+    os_security_packages="coreutils curl diffutils gir1.2-glib-2.0 libattr1 libc-bin libc-dev-bin libc6 libc6-dev libcurl3t64-gnutls libcurl4t64 libexpat1 libgcrypt20 libglib2.0-0t64 libglib2.0-data libgssapi-krb5-2 libk5crypto3 libkrb5-3 libkrb5support0 libp11-kit0 libperl5.38t64 libpython3.12-minimal libpython3.12-stdlib libsqlite3-0 libssh-4 libssl3t64 libxml2 nginx nginx-common nginx-light openssh-client openssh-server openssh-sftp-server openssl perl perl-base perl-modules-5.38 python3.12 python3.12-minimal rsyslog tar wget zlib1g"; \
     installed_os_packages=""; \
     for package in $os_security_packages; do \
         if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q "install ok installed"; then \
@@ -61,7 +61,7 @@ RUN conda run -p $AZUREML_CONDA_ENVIRONMENT_PATH pip install --no-cache-dir \
 # parent packages still allow the older, vulnerable versions.
 RUN pip install \
                 azureml-core==1.61.0.post4 \
-                azureml-mlflow==1.62.0.post5 \
+                azureml-mlflow==1.62.0.post6 \
                 azureml-pipeline-core==1.62.0 \
                 azureml-telemetry==1.62.0 \
                 azureml-interpret==1.62.0 \

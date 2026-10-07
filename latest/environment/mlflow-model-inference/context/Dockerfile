@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:20260810.v1
+FROM mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:20260929.v1
 
 RUN mkdir -p /opt/miniconda/
 RUN mkdir -p etc/nginx/sites-available
@@ -82,6 +82,9 @@ RUN conda clean -afy && \
     rm conda_dependencies.yaml && \
     conda run -p $AZUREML_CONDA_ENVIRONMENT_PATH pip cache purge && \
     conda clean -a -y  
+
+# pip ships an internal bom.cdx.json documenting old vendored msgpack/setuptools
+RUN find / -path "*/pip/_vendor/bom.cdx.json" -delete 2>/dev/null || true
 
 RUN pip install pipdeptree
 

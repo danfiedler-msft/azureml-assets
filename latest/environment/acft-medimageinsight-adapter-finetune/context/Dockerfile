@@ -1,19 +1,46 @@
-FROM mcr.microsoft.com/aifx/acpt/stable-ubuntu2204-cu126-py310-torch280:biweekly.202608.2
+FROM mcr.microsoft.com/aifx/acpt/stable-ubuntu2204-cu126-py310-torch280:biweekly.202610.1
 
 USER root
 
 RUN apt-get -y update && apt-get -y upgrade \
  && apt-get -y install --only-upgrade \
+        coreutils \
+        curl \
+        diffutils \
         dotnet-hostfxr-8.0 \
         dotnet-host-8.0 \
         dotnet-runtime-8.0 \
+        libattr1 \
+        libc6 \
+        libc6-dev \
+        libc-bin \
+        libc-dev-bin \
+        libevent-core-2.1-7 \
         libgssapi-krb5-2 \
         libgcrypt20 \
         libk5crypto3 \
         libkrb5-3 \
         libkrb5support0 \
+        libcurl3-gnutls \
+        libcurl4 \
         liblzma5 \
+        libp11-kit0 \
+        libperl5.34 \
+        libpng16-16 \
+        libpython3.10-minimal \
+        libpython3.10-stdlib \
         libsqlite3-0 \
+        libssh-4 \
+        libssl-dev \
+        libssl3 \
+        locales \
+        openssh-client \
+        openssl \
+        perl \
+        perl-base \
+        perl-modules-5.34 \
+        python3.10 \
+        python3.10-minimal \
         tar \
         wget \
         xz-utils \
@@ -22,7 +49,9 @@ RUN apt-get -y update && apt-get -y upgrade \
 
 # Install required PyPI packages.
 COPY requirements.txt .
-RUN pip install -r requirements.txt --no-cache-dir
+RUN pip install -r requirements.txt --no-cache-dir && \
+    rm -rf /opt/conda/envs/ptca/lib/python3.10/site-packages/setuptools-70.3.0.dist-info \
+           /opt/conda/envs/ptca/lib/python3.10/site-packages/msgpack-1.1*.dist-info
 
 # torch is a direct training dependency; install CUDA 12.6 PyTorch wheels to
 # override vulnerable torch from the ACPT base image (GHSA-vgrw-7cvw-pwgx,
@@ -87,6 +116,52 @@ RUN conda run -n base python -m pip install --no-cache-dir --upgrade 'PyJWT>=2.1
     rm -rf /opt/conda/lib/python3.14/site-packages/cryptography-48.0.1.dist-info \
            /opt/conda/lib/python3.14/site-packages/pydantic_settings-2.12*.dist-info \
            /opt/conda/lib/python3.14/site-packages/pydantic__settings-2.12*.dist-info \
-           /opt/conda/lib/python3.14/site-packages/msgpack-1.1*.dist-info
+           /opt/conda/lib/python3.14/site-packages/msgpack-1.1*.dist-info \
+           /opt/conda/lib/python3.14/site-packages/setuptools-70.3.0.dist-info
+
+# pip: direct package manager upgraded in both envs; fixes GHSA-qwm4-qh6w-59xr.
+# anyio: pinned transitive dep of anaconda-cli-base/httpx tooling in base env; brought in by base image, fixes GHSA-5p39-cfhj-2xmp and GHSA-82r6-8w77-94w6.
+RUN conda install -y -n base -c conda-forge 'pip=26.2.0' 'anyio=4.14.2' && \
+    conda run -n ptca python -m pip install --no-cache-dir --upgrade 'pip==26.2.0' && \
+    rm -rf /opt/conda/lib/python3.14/site-packages/pip-26.1*.dist-info \
+           /opt/conda/lib/python3.14/site-packages/anyio-4.12*.dist-info \
+           /opt/conda/envs/ptca/lib/python3.10/site-packages/pip-26.1*.dist-info && \
+    conda clean -ay
+
+# Remove stale scanner metadata while retaining the upgraded installations.
+RUN set -eu; \
+    roots="/opt /root"; \
+    [ ! -d /azureml-envs ] || roots="$roots /azureml-envs"; \
+    find $roots -type f \( \
+        -path '*/site-packages/pip/_vendor/bom.cdx.json' -o \
+        -path '*/site-packages/pip/_vendor/vendor.txt' \
+    \) -delete; \
+    find $roots -type d \( \
+        -name 'setuptools-70.3.0.dist-info' -o \
+        -name 'setuptools-70.3.0.egg-info' -o \
+        -name 'setuptools-70.3.0-py*.egg-info' -o \
+        -name 'msgpack-1.1.2.dist-info' -o \
+        -name 'msgpack-1.1.2.egg-info' -o \
+        -name 'msgpack-1.1.2-py*.egg-info' \
+    \) -prune -exec rm -rf {} +; \
+    find $roots -type f \( \
+        -path '*/conda-meta/setuptools-70.3.0-*.json' -o \
+        -path '*/conda-meta/msgpack-python-1.1.2-*.json' -o \
+        -path '*/conda-meta/msgpack-1.1.2-*.json' \
+    \) -delete; \
+    stale="$(find $roots \( \
+        -path '*/site-packages/pip/_vendor/bom.cdx.json' -o \
+        -path '*/site-packages/pip/_vendor/vendor.txt' -o \
+        -name 'setuptools-70.3.0.dist-info' -o \
+        -name 'setuptools-70.3.0.egg-info' -o \
+        -name 'setuptools-70.3.0-py*.egg-info' -o \
+        -name 'msgpack-1.1.2.dist-info' -o \
+        -name 'msgpack-1.1.2.egg-info' -o \
+        -name 'msgpack-1.1.2-py*.egg-info' -o \
+        -path '*/conda-meta/setuptools-70.3.0-*.json' -o \
+        -path '*/conda-meta/msgpack-python-1.1.2-*.json' -o \
+        -path '*/conda-meta/msgpack-1.1.2-*.json' \
+    \) -print -quit)"; \
+    [ -z "$stale" ] || { echo "stale setuptools/msgpack scanner metadata remains: $stale" >&2; exit 1; }
 
 RUN conda clean -a -y && rm -rf /opt/miniconda/pkgs/
